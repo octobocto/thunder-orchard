@@ -232,19 +232,31 @@ impl Net {
         &self,
         addr: SocketAddr,
         peer_connection_handle: PeerConnectionHandle,
+        info_rx: mpsc::UnboundedReceiver<PeerConnectionInfo>,
     ) -> Result<(), error::AlreadyConnected> {
         tracing::trace!(%addr, "add active peer: starting");
         let mut active_peers_write = self.active_peers.write();
         match active_peers_write.entry(addr) {
             hash_map::Entry::Occupied(_) => {
                 tracing::error!(%addr, "add active peer: already connected");
-                Err(error::AlreadyConnected(addr))
+                return Err(error::AlreadyConnected(addr));
             }
             hash_map::Entry::Vacant(active_peer_entry) => {
                 active_peer_entry.insert(peer_connection_handle);
-                Ok(())
             }
         }
+        drop(active_peers_write);
+        tokio::spawn({
+            let info_rx = StreamNotifyClose::new(info_rx)
+                .map(move |info| Ok((addr, info)));
+            let peer_info_tx = self.peer_info_tx.clone();
+            async move {
+                if let Err(_send_err) = info_rx.forward(peer_info_tx).await {
+                    tracing::error!(%addr, "Failed to send peer connection info");
+                }
+            }
+        });
+        Ok(())
     }
 
     pub fn remove_active_peer(&self, addr: SocketAddr) {
@@ -316,20 +328,7 @@ impl Net {
 
         let (connection_handle, info_rx) =
             peer::connect(connecting, connection_ctxt);
-        tracing::trace!("connect peer: spawning info rx");
-        tokio::spawn({
-            let info_rx = StreamNotifyClose::new(info_rx)
-                .map(move |info| Ok((addr, info)));
-            let peer_info_tx = self.peer_info_tx.clone();
-            async move {
-                if let Err(_send_err) = info_rx.forward(peer_info_tx).await {
-                    tracing::error!(%addr, "Failed to send peer connection info");
-                }
-            }
-        });
-
-        tracing::trace!("connect peer: adding to active peers");
-        self.add_active_peer(addr, connection_handle)?;
+        self.add_active_peer(addr, connection_handle, info_rx)?;
         Ok(())
     }
 
@@ -489,18 +488,7 @@ impl Net {
         };
         let (connection_handle, info_rx) =
             peer::handle(connection_ctxt, connection);
-        tokio::spawn({
-            let info_rx = StreamNotifyClose::new(info_rx)
-                .map(move |info| Ok((addr, info)));
-            let peer_info_tx = self.peer_info_tx.clone();
-            async move {
-                if let Err(_send_err) = info_rx.forward(peer_info_tx).await {
-                    tracing::error!(%addr, "Failed to send peer connection info");
-                }
-            }
-        });
-        // TODO: is this the right state?
-        self.add_active_peer(addr, connection_handle)?;
+        self.add_active_peer(addr, connection_handle, info_rx)?;
         Ok(Some(addr))
     }
 
@@ -566,6 +554,56 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_duplicate_has_no_peer_close_event() -> anyhow::Result<()>
+    {
+        let directory = temp_dir::TempDir::new()?;
+        let mut options = heed::EnvOpenOptions::new().read_txn_without_tls();
+        options
+            .map_size(64 * 1024 * 1024)
+            .max_dbs(Archive::NUM_DBS + State::NUM_DBS + Net::NUM_DBS);
+        let env = unsafe { sneed::Env::open(&options, directory.path()) }?;
+        let archive = Archive::new(&env)?;
+        let state = State::new(&env)?;
+        let (net, info_rx) = Net::new(
+            &env,
+            archive,
+            None,
+            Network::Regtest,
+            state,
+            (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        )?;
+        let (remote, _) =
+            make_server_endpoint((std::net::Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        net.connect_peer(env.clone(), addr)?;
+        let connection_ctxt = super::PeerConnectionCtxt {
+            env,
+            archive: net.archive.clone(),
+            magic_bytes: net.magic_bytes,
+            state: net.state.clone(),
+        };
+        let (duplicate, duplicate_info) = super::peer::connect(
+            net.server.connect(addr, "localhost")?,
+            connection_ctxt,
+        );
+
+        let error = net
+            .add_active_peer(addr, duplicate, duplicate_info)
+            .unwrap_err();
+        assert_eq!(error.0, addr);
+        assert_eq!(net.get_active_peers().len(), 1);
+        drop(net);
+
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            info_rx.collect::<Vec<_>>(),
+        )
+        .await?;
+        assert_eq!(events.iter().filter(|(_, info)| info.is_none()).count(), 1);
+        Ok(())
+    }
 
     #[test]
     fn alphanet_seed_uses_sidechain_port() {
