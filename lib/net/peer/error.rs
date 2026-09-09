@@ -319,6 +319,10 @@ impl From<crate::state::Error> for Error {
 }
 
 impl Error {
+    pub fn is_connect_timeout(&self) -> bool {
+        matches!(self, Self::Connection(quinn::ConnectionError::TimedOut))
+    }
+
     pub fn is_duplicate_connection(&self) -> bool {
         let mut source = std::error::Error::source(self);
         while let Some(error) = source {
@@ -337,6 +341,28 @@ impl Error {
 #[cfg(test)]
 mod test {
     use super::{Error, connection, mailbox};
+
+    #[test]
+    fn only_the_handshake_timeout_is_a_connect_timeout() {
+        assert!(
+            Error::Connection(quinn::ConnectionError::TimedOut)
+                .is_connect_timeout()
+        );
+        for error in [
+            Error::Mailbox(mailbox::Error::HeartbeatTimeout),
+            Error::ReceiveResponse(connection::ReceiveResponse::from(
+                connection::Receive::Timeout,
+            )),
+            Error::ReceiveResponse(connection::ReceiveResponse::from(
+                connection::Receive::BadMagic([0x85, 0x18, 0x95, 0x01]),
+            )),
+            Error::ReceiveResponse(connection::ReceiveResponse::from(
+                quinn::ConnectionError::TimedOut,
+            )),
+        ] {
+            assert!(!error.is_connect_timeout());
+        }
+    }
 
     #[test]
     fn duplicate_close_survives_the_request_path() {
