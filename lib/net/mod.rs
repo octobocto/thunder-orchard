@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, hash_map},
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
 
@@ -177,12 +177,28 @@ const FORKNET_SEED_NODE_ADDRS: &[SocketAddr] = {
     &[BIP300_XYZ]
 };
 
-const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
-    match network {
+const ALPHANET_SEED_NODE_ADDR: (&str, u16) =
+    ("seed.alpha.ecash.eu.com", 4000 + THIS_SIDECHAIN as u16);
+
+fn seed_node_addrs(network: Network) -> Result<Vec<SocketAddr>, Error> {
+    let addresses = match network {
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
         Network::Regtest => &[],
         Network::Forknet => FORKNET_SEED_NODE_ADDRS,
-    }
+        Network::Alphanet => {
+            return ALPHANET_SEED_NODE_ADDR
+                .to_socket_addrs()
+                .map(Iterator::collect)
+                .map_err(|source| Error::ResolveSeed {
+                    address: format!(
+                        "{}:{}",
+                        ALPHANET_SEED_NODE_ADDR.0, ALPHANET_SEED_NODE_ADDR.1
+                    ),
+                    source,
+                });
+        }
+    };
+    Ok(addresses.to_vec())
 }
 
 // Keep track of peer state
@@ -346,8 +362,8 @@ impl Net {
                 None => {
                     let known_peers =
                         DatabaseUnique::create(env, &mut rwtxn, "known_peers")?;
-                    for seed_node_addr in seed_node_addrs(network) {
-                        known_peers.put(&mut rwtxn, seed_node_addr, &())?;
+                    for seed_node_addr in seed_node_addrs(network)? {
+                        known_peers.put(&mut rwtxn, &seed_node_addr, &())?;
                     }
                     known_peers
                 }
@@ -544,5 +560,90 @@ impl Net {
                     tracing::warn!("Failed to push tx {txid} to peer at {addr}")
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alphanet_seed_uses_sidechain_port() {
+        assert_eq!(ALPHANET_SEED_NODE_ADDR, ("seed.alpha.ecash.eu.com", 4098));
+    }
+
+    #[test]
+    fn network_magic_keeps_distinct_values() {
+        for (network, last_byte) in [
+            (Network::Regtest, 0),
+            (Network::Signet, 1),
+            (Network::Forknet, 2),
+            (Network::Alphanet, 3),
+        ] {
+            assert_eq!(
+                peer_message::magic_bytes(network),
+                [0x8d, 0x19, 0x28, last_byte]
+            );
+        }
+    }
+
+    #[test]
+    fn existing_network_seeds_stay_the_same() -> anyhow::Result<()> {
+        assert_eq!(seed_node_addrs(Network::Signet)?, SIGNET_SEED_NODE_ADDRS);
+        assert_eq!(seed_node_addrs(Network::Forknet)?, FORKNET_SEED_NODE_ADDRS);
+        assert!(seed_node_addrs(Network::Regtest)?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ipv4_bind_accepts_mixed_address_families() -> anyhow::Result<()> {
+        let directory = temp_dir::TempDir::new()?;
+        let mut options = heed::EnvOpenOptions::new().read_txn_without_tls();
+        options
+            .map_size(64 * 1024 * 1024)
+            .max_dbs(Archive::NUM_DBS + State::NUM_DBS + Net::NUM_DBS);
+        let env = unsafe { sneed::Env::open(&options, directory.path()) }?;
+        let archive = Archive::new(&env)?;
+        let state = State::new(&env)?;
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let ipv4 = socket.local_addr()?;
+        let ipv6 =
+            SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), ipv4.port());
+        let mut transaction = env.write_txn()?;
+        let peers: DatabaseUnique<SerdeBincode<SocketAddr>, Unit> =
+            DatabaseUnique::create(&env, &mut transaction, "known_peers")?;
+        for address in [ipv6, ipv4] {
+            peers.put(&mut transaction, &address, &())?;
+        }
+        transaction.commit()?;
+        let (net, _peer_info) = Net::new(
+            &env,
+            archive,
+            None,
+            Network::Regtest,
+            state,
+            "0.0.0.0:0".parse()?,
+        )?;
+        assert_eq!(
+            net.get_active_peers()
+                .iter()
+                .map(|peer| peer.address)
+                .collect::<Vec<_>>(),
+            vec![ipv4]
+        );
+        assert_eq!(
+            net.server.local_addr()?.ip(),
+            std::net::Ipv4Addr::UNSPECIFIED
+        );
+        let transaction = env.read_txn()?;
+        assert!(peers.try_get(&transaction, &ipv4)?.is_some());
+        assert!(peers.try_get(&transaction, &ipv6)?.is_none());
+        drop(transaction);
+        net.remove_active_peer(ipv4);
+        net.server.close(0_u32.into(), b"test complete");
+        net.server.wait_idle().await;
+        drop(net);
+        drop(env);
+        Ok(())
     }
 }
