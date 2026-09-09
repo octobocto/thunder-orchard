@@ -141,17 +141,6 @@ jobs:
           rm -r bitcoin-30.2
           popd
 
-      - name: Download latest bip300301_enforcer
-        run: |
-          pushd ..
-          wget https://releases.drivechain.info/bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          unzip bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          rm bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          mv bip300301-enforcer-latest-x86_64-unknown-linux-gnu/bip300301-enforcer-*-x86_64-unknown-linux-gnu bip300301-enforcer
-          rm -r bip300301-enforcer-latest-x86_64-unknown-linux-gnu
-          chmod +x bip300301-enforcer
-          popd
-
       - name: Restore electrs from cache
         uses: actions/cache/restore@v6
         with:
@@ -176,12 +165,14 @@ jobs:
           shared-key: release-x86_64-unknown-linux-gnu
 
       - name: Build (release)
-        run: cargo build --release --bin thunder_orchard_app --example integration_tests
+        run: |
+          cargo build --locked --release --manifest-path bip300301_enforcer/Cargo.toml --target-dir "$PWD/target" --bin bip300301_enforcer
+          cargo build --locked --release --bin thunder_orchard_app --example integration_tests
 
       - name: Run integration tests
         id: runIntegrationTests
         run: |
-          export BIP300301_ENFORCER='../bip300301-enforcer'
+          export BIP300301_ENFORCER='target/release/bip300301_enforcer'
           export BITCOIND='../bitcoin-patched-bins/bitcoind'
           export BITCOIND_UNPATCHED='../bitcoin-unpatched-bins/bitcoind'
           export BITCOIN_CLI='../bitcoin-patched-bins/bitcoin-cli'
