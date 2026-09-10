@@ -556,6 +556,7 @@ pub enum Network {
     Signet,
     Regtest,
     Forknet,
+    Alphanet,
 }
 
 /// Semver-compatible version

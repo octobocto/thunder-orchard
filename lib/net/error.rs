@@ -111,6 +111,12 @@ pub enum Error {
     QuinnRustls(#[from] quinn::crypto::rustls::Error),
     #[error("rcgen")]
     RcGen(#[from] rcgen::Error),
+    #[error("failed to resolve seed address {address}")]
+    ResolveSeed {
+        address: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("read to end error")]
     ReadToEnd(#[from] quinn::ReadToEndError),
     #[error("send datagram error")]
