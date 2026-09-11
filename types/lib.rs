@@ -608,6 +608,30 @@ pub struct Block {
     pub body: Body,
 }
 
+/// Step of the sync with the mainchain
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum MainchainSyncPhase {
+    #[default]
+    Idle,
+    /// Fetch mainchain headers from the enforcer
+    Headers,
+}
+
+/// Progress of the sync with the mainchain
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema,
+)]
+pub struct MainchainSyncProgress {
+    pub phase: MainchainSyncPhase,
+    pub done: u32,
+    pub total: u32,
+    /// Height of the mainchain tip that the sync moves to
+    pub tip_height: u32,
+}
+
 #[cfg(test)]
 mod withdrawal_bundle_order_regression {
     use super::*;
