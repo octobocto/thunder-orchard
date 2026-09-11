@@ -250,6 +250,12 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         Ok(res)
     }
 
+    async fn mainchain_sync_progress(
+        &self,
+    ) -> RpcResult<thunder_orchard::types::MainchainSyncProgress> {
+        Ok(self.app.node.mainchain_sync_progress())
+    }
+
     async fn pending_withdrawal_bundle(
         &self,
     ) -> RpcResult<Option<WithdrawalBundle>> {

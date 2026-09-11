@@ -25,10 +25,10 @@ pub mod node {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_orchard_types::{
-        Block, BlockHash, MerkleRoot, OutPoint, Output, OutputContent, Pointed,
-        PointedOutput, SpentOutput, Transaction, TransparentAddress, Txid,
-        WithdrawalBundle, net::Peer, schema as thunder_orchard_schema,
-        transaction,
+        Block, BlockHash, MainchainSyncProgress, MerkleRoot, OutPoint, Output,
+        OutputContent, Pointed, PointedOutput, SpentOutput, Transaction,
+        TransparentAddress, Txid, WithdrawalBundle, net::Peer,
+        schema as thunder_orchard_schema, transaction,
     };
     use utoipa::ToSchema;
 
@@ -170,6 +170,13 @@ pub mod node {
         /// List all UTXOs
         #[method(name = "list_utxos")]
         async fn list_utxos(&self) -> RpcResult<Vec<PointedOutput>>;
+
+        /// Get the progress of the sync with the mainchain
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "mainchain_sync_progress")]
+        async fn mainchain_sync_progress(
+            &self,
+        ) -> RpcResult<MainchainSyncProgress>;
 
         /// Get pending withdrawal bundle
         #[open_api_method(output_schema(ToSchema))]
