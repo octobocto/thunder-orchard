@@ -47,7 +47,7 @@ sneed = { workspace = true, features = ["observe"] }
 thiserror = { workspace = true }
 thunder_orchard_types = { path = "../types", features = ["heed", "shardtree"] }
 tiny-bip39 = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "sync"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true }

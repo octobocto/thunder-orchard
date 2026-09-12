@@ -854,6 +854,8 @@ impl NetTask {
             PeerInfo(Option<(SocketAddr, Option<PeerConnectionInfo>)>),
             // Signal to reconnect to a peer
             ReconnectPeer(SocketAddr),
+            // The loop that dials known peers stopped on an error
+            RedialKnownPeers(Box<net::Error>),
         }
         let accept_connections = stream::try_unfold((), |()| {
             let env = self.ctxt.env.clone();
@@ -907,6 +909,17 @@ impl NetTask {
         let (reconnect_peer_spawner, reconnect_peer_rx) = join_set::new();
         let reconnect_peer_stream = reconnect_peer_rx
             .map(|addr| MailboxItem::ReconnectPeer(addr.unwrap()));
+        let redial_known_peers_stream = {
+            const MIN_DELAY: Duration = Duration::from_secs(60);
+            const MAX_DELAY: Duration = Duration::from_secs(600);
+            let env = self.ctxt.env.clone();
+            let net = self.ctxt.net.clone();
+            stream::once(async move {
+                net.redial_known_peers(env, MIN_DELAY, MAX_DELAY).await
+            })
+            .filter_map(async |res| res.err().map(Box::new))
+            .map(MailboxItem::RedialKnownPeers)
+        };
         let mut mailbox_stream = stream::select_all([
             accept_connections.boxed(),
             forward_request_stream.boxed(),
@@ -914,6 +927,7 @@ impl NetTask {
             new_tip_ready_stream.boxed(),
             peer_info_stream.boxed(),
             reconnect_peer_stream.boxed(),
+            redial_known_peers_stream.boxed(),
         ]);
         // Attempt to switch to a descendant tip once a body has been
         // stored, if all other ancestor bodies are available.
@@ -1195,6 +1209,9 @@ impl NetTask {
                             )
                         }
                     }
+                }
+                MailboxItem::RedialKnownPeers(err) => {
+                    return Err(Error::Net(err));
                 }
             }
         }

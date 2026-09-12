@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map},
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
+    time::Duration,
 };
 
 use fallible_iterator::FallibleIterator;
@@ -9,7 +10,9 @@ use futures::{StreamExt, channel::mpsc};
 use heed::types::{SerdeBincode, Unit};
 use parking_lot::RwLock;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
-use sneed::{DatabaseUnique, DbError, EnvError, RwTxn, RwTxnError, UnitKey};
+use sneed::{
+    DatabaseUnique, DbError, EnvError, RoTxn, RwTxn, RwTxnError, UnitKey,
+};
 use tokio_stream::StreamNotifyClose;
 use tracing::instrument;
 
@@ -180,6 +183,14 @@ const FORKNET_SEED_NODE_ADDRS: &[SocketAddr] = {
 const ALPHANET_SEED_NODE_ADDR: (&str, u16) =
     ("seed.alpha.ecash.eu.com", 4000 + THIS_SIDECHAIN as u16);
 
+/// Name of the seed node that the network resolves at every dial.
+fn seed_node_name(network: Network) -> Option<(&'static str, u16)> {
+    match network {
+        Network::Alphanet => Some(ALPHANET_SEED_NODE_ADDR),
+        Network::Signet | Network::Regtest | Network::Forknet => None,
+    }
+}
+
 fn seed_node_addrs(network: Network) -> Result<Vec<SocketAddr>, Error> {
     let addresses = match network {
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
@@ -222,6 +233,7 @@ pub struct Net {
     peer_info_tx:
         mpsc::UnboundedSender<(SocketAddr, Option<PeerConnectionInfo>)>,
     known_peers: DatabaseUnique<SerdeBincode<SocketAddr>, Unit>,
+    seed_node_name: Option<(&'static str, u16)>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
@@ -344,6 +356,111 @@ impl Net {
             .map_err(|err| DbError::from(err).into())
     }
 
+    fn known_peer_addrs(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Vec<SocketAddr>, DbError> {
+        let peer_addrs = self.known_peers.iter_keys(rotxn)?.collect()?;
+        Ok(peer_addrs)
+    }
+
+    fn is_active_peer(&self, addr: &SocketAddr) -> bool {
+        self.active_peers.read().contains_key(addr)
+    }
+
+    /// Resolve the seed node name of the network to addresses.
+    /// Returns an empty vector for a network without a seed node name.
+    async fn resolve_seed_node_addrs(&self) -> Result<Vec<SocketAddr>, Error> {
+        let Some((host, port)) = self.seed_node_name else {
+            return Ok(Vec::new());
+        };
+        let addrs =
+            tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|source| Error::ResolveSeed {
+                    address: format!("{host}:{port}"),
+                    source,
+                })?;
+        Ok(addrs.collect())
+    }
+
+    /// Dial a peer that the database knows.
+    /// Returns `true` if a connection started, and `false` if the peer is
+    /// already connected.
+    fn dial_known_peer(
+        &self,
+        env: sneed::Env<heed::WithoutTls>,
+        addr: SocketAddr,
+    ) -> Result<bool, Error> {
+        if self.is_active_peer(&addr) {
+            return Ok(false);
+        }
+        tracing::trace!(%addr, "connecting to already known peer");
+        let () = self.connect_peer(env, addr)?;
+        Ok(true)
+    }
+
+    /// Dial every peer that the database knows, and every address that the
+    /// seed node name resolves to.
+    /// Returns the number of connections that started.
+    async fn dial_known_peers(
+        &self,
+        env: &sneed::Env<heed::WithoutTls>,
+    ) -> Result<usize, Error> {
+        let mut peer_addrs: HashSet<SocketAddr> = {
+            let rotxn = env.read_txn().map_err(EnvError::from)?;
+            self.known_peer_addrs(&rotxn)?.into_iter().collect()
+        };
+        match self.resolve_seed_node_addrs().await {
+            Ok(seed_addrs) => peer_addrs.extend(seed_addrs),
+            Err(err) => {
+                tracing::error!("{:#}", ErrorChain::new(&err))
+            }
+        }
+        let mut dialed = 0;
+        for peer_addr in peer_addrs {
+            match self.dial_known_peer(env.clone(), peer_addr) {
+                Ok(true) => dialed += 1,
+                Ok(false) => (),
+                Err(err) => {
+                    tracing::error!(%peer_addr, "{:#}", ErrorChain::new(&err))
+                }
+            }
+        }
+        Ok(dialed)
+    }
+
+    /// Dial the known peers again while no peer connection exists.
+    /// `min_delay` is the shortest wait between two checks for a connection.
+    /// The wait doubles after each redial, up to `max_delay`.
+    /// The future returns only on a database error.
+    pub async fn redial_known_peers(
+        &self,
+        env: sneed::Env<heed::WithoutTls>,
+        min_delay: Duration,
+        max_delay: Duration,
+    ) -> Result<(), Error> {
+        let mut delay = min_delay;
+        let mut no_peers_at_last_check = false;
+        loop {
+            tokio::time::sleep(delay).await;
+            if !self.active_peers.read().is_empty() {
+                delay = min_delay;
+                no_peers_at_last_check = false;
+                continue;
+            }
+            // The net task reconnects to a peer that errored. A redial waits
+            // for a full delay with no connection, so it never dials first.
+            if !no_peers_at_last_check {
+                no_peers_at_last_check = true;
+                continue;
+            }
+            let dialed = self.dial_known_peers(&env).await?;
+            tracing::info!(dialed, "no peer connection: dialed known peers");
+            delay = (2 * delay).min(max_delay);
+        }
+    }
+
     pub fn new(
         env: &sneed::Env<heed::WithoutTls>,
         archive: Archive,
@@ -383,20 +500,14 @@ impl Net {
             active_peers,
             peer_info_tx,
             known_peers,
+            seed_node_name: seed_node_name(network),
             _version: version,
         };
-        #[allow(clippy::let_and_return)]
-        let known_peers: Vec<_> = {
+        let known_peers: Vec<SocketAddr> = {
             let rotxn = env.read_txn().map_err(EnvError::from)?;
-            let known_peers = net
-                .known_peers
-                .iter(&rotxn)
-                .map_err(DbError::from)?
-                .collect()
-                .map_err(DbError::from)?;
-            known_peers
+            net.known_peer_addrs(&rotxn)?
         };
-        let () = known_peers.into_iter().try_for_each(|(peer_addr, _)| {
+        let () = known_peers.into_iter().try_for_each(|peer_addr| {
             tracing::trace!(
                 "new net: connecting to already known peer at {peer_addr}"
             );
@@ -553,7 +664,132 @@ impl Net {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context as _;
+
     use super::*;
+
+    const TEST_REDIAL_MIN_DELAY: Duration = Duration::from_millis(50);
+    const TEST_REDIAL_MAX_DELAY: Duration = Duration::from_millis(200);
+
+    type TempNet = (
+        temp_dir::TempDir,
+        sneed::Env<heed::WithoutTls>,
+        Net,
+        PeerInfoRx,
+    );
+
+    fn temp_net() -> anyhow::Result<TempNet> {
+        let directory = temp_dir::TempDir::new()?;
+        let mut options = heed::EnvOpenOptions::new().read_txn_without_tls();
+        options
+            .map_size(64 * 1024 * 1024)
+            .max_dbs(Archive::NUM_DBS + State::NUM_DBS + Net::NUM_DBS);
+        let env = unsafe { sneed::Env::open(&options, directory.path()) }?;
+        let archive = Archive::new(&env)?;
+        let state = State::new(&env)?;
+        let (net, peer_info_rx) = Net::new(
+            &env,
+            archive,
+            None,
+            Network::Regtest,
+            state,
+            (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        )?;
+        Ok((directory, env, net, peer_info_rx))
+    }
+
+    fn spawn_redial(
+        env: sneed::Env<heed::WithoutTls>,
+        net: Net,
+    ) -> tokio::task::JoinHandle<Result<(), Error>> {
+        tokio::spawn(async move {
+            net.redial_known_peers(
+                env,
+                TEST_REDIAL_MIN_DELAY,
+                TEST_REDIAL_MAX_DELAY,
+            )
+            .await
+        })
+    }
+
+    /// A peer that drops leaves no connection, so the node dials it again.
+    #[tokio::test]
+    async fn a_lost_peer_is_dialed_again() -> anyhow::Result<()> {
+        let (_directory, env, net, _peer_info_rx) = temp_net()?;
+        let (remote, _) =
+            make_server_endpoint((std::net::Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        net.connect_peer(env.clone(), addr)?;
+        assert_eq!(net.get_active_peers().len(), 1);
+        net.remove_active_peer(addr);
+        assert!(net.get_active_peers().is_empty());
+
+        let redial = spawn_redial(env.clone(), net.clone());
+        let dialed_again =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while net.get_active_peers().is_empty() {
+                    tokio::time::sleep(TEST_REDIAL_MIN_DELAY).await;
+                }
+            })
+            .await;
+        redial.abort();
+
+        dialed_again.context("the node dialed the lost peer no more")?;
+        assert_eq!(net.get_active_peers()[0].address, addr);
+        Ok(())
+    }
+
+    /// A peer that holds a connection takes no redial, and the loop starts no
+    /// second connection to it.
+    #[tokio::test]
+    async fn a_connected_peer_takes_no_redial() -> anyhow::Result<()> {
+        let (_directory, env, net, _peer_info_rx) = temp_net()?;
+        let (remote, _) =
+            make_server_endpoint((std::net::Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        net.connect_peer(env.clone(), addr)?;
+
+        assert!(!net.dial_known_peer(env.clone(), addr)?);
+        assert_eq!(net.dial_known_peers(&env).await?, 0);
+
+        let redial = spawn_redial(env.clone(), net.clone());
+        tokio::time::sleep(TEST_REDIAL_MAX_DELAY * 5).await;
+        redial.abort();
+
+        let peers = net.get_active_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, addr);
+        Ok(())
+    }
+
+    /// The database holds the address that the seed node had at startup.
+    /// A seed node that moves gets a dial at the address that the name
+    /// resolves to now.
+    #[tokio::test]
+    async fn a_moved_seed_is_dialed_at_the_new_address() -> anyhow::Result<()> {
+        let (_directory, env, mut net, _peer_info_rx) = temp_net()?;
+        let stale_addr =
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 1_u16));
+        let mut rwtxn = env.write_txn()?;
+        net.known_peers.put(&mut rwtxn, &stale_addr, &())?;
+        rwtxn.commit()?;
+        let (seed, _) =
+            make_server_endpoint((std::net::Ipv4Addr::LOCALHOST, 0).into())?;
+        let seed_addr = seed.local_addr()?;
+        net.seed_node_name = Some(("localhost", seed_addr.port()));
+
+        let redial = spawn_redial(env.clone(), net.clone());
+        let dialed_seed = tokio::time::timeout(Duration::from_secs(5), async {
+            while !net.is_active_peer(&seed_addr) {
+                tokio::time::sleep(TEST_REDIAL_MIN_DELAY).await;
+            }
+        })
+        .await;
+        redial.abort();
+
+        dialed_seed.context("the node dialed the moved seed node no more")?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn rejected_duplicate_has_no_peer_close_event() -> anyhow::Result<()>
