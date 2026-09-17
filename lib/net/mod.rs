@@ -187,7 +187,10 @@ const ALPHANET_SEED_NODE_ADDR: (&str, u16) =
 fn seed_node_name(network: Network) -> Option<(&'static str, u16)> {
     match network {
         Network::Alphanet => Some(ALPHANET_SEED_NODE_ADDR),
-        Network::Signet | Network::Regtest | Network::Forknet => None,
+        Network::Betanet
+        | Network::Signet
+        | Network::Regtest
+        | Network::Forknet => None,
     }
 }
 
@@ -195,6 +198,8 @@ fn seed_node_addrs(network: Network) -> Result<Vec<SocketAddr>, Error> {
     let addresses = match network {
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
         Network::Regtest => &[],
+        // No seed node runs on betanet yet.
+        Network::Betanet => &[],
         Network::Forknet => FORKNET_SEED_NODE_ADDRS,
         Network::Alphanet => {
             return ALPHANET_SEED_NODE_ADDR
@@ -853,6 +858,7 @@ mod tests {
             (Network::Signet, 1),
             (Network::Forknet, 2),
             (Network::Alphanet, 3),
+            (Network::Betanet, 4),
         ] {
             assert_eq!(
                 peer_message::magic_bytes(network),
