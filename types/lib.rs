@@ -552,11 +552,11 @@ pub struct Tip {
     strum(serialize_all = "lowercase")
 )]
 pub enum Network {
+    Betanet,
+    Forknet,
+    Regtest,
     #[default]
     Signet,
-    Regtest,
-    Forknet,
-    Alphanet,
 }
 
 /// Semver-compatible version

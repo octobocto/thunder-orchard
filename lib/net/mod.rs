@@ -180,14 +180,16 @@ const FORKNET_SEED_NODE_ADDRS: &[SocketAddr] = {
     &[BIP300_XYZ]
 };
 
-const ALPHANET_SEED_NODE_ADDR: (&str, u16) =
-    ("seed.alpha.ecash.eu.com", 4000 + THIS_SIDECHAIN as u16);
+const BETANET_SEED_NODE_ADDRS: &[(&str, u16)] = &[
+    ("seed.beta.ecash.drivecha.in", 4000 + THIS_SIDECHAIN as u16),
+    ("seed.beta.ecash.ninja", 4000 + THIS_SIDECHAIN as u16),
+];
 
 /// Name of the seed node that the network resolves at every dial.
-fn seed_node_name(network: Network) -> Option<(&'static str, u16)> {
+fn seed_node_names(network: Network) -> &'static [(&'static str, u16)] {
     match network {
-        Network::Alphanet => Some(ALPHANET_SEED_NODE_ADDR),
-        Network::Signet | Network::Regtest | Network::Forknet => None,
+        Network::Betanet => BETANET_SEED_NODE_ADDRS,
+        Network::Signet | Network::Regtest | Network::Forknet => &[],
     }
 }
 
@@ -196,17 +198,18 @@ fn seed_node_addrs(network: Network) -> Result<Vec<SocketAddr>, Error> {
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
         Network::Regtest => &[],
         Network::Forknet => FORKNET_SEED_NODE_ADDRS,
-        Network::Alphanet => {
-            return ALPHANET_SEED_NODE_ADDR
-                .to_socket_addrs()
-                .map(Iterator::collect)
-                .map_err(|source| Error::ResolveSeed {
-                    address: format!(
-                        "{}:{}",
-                        ALPHANET_SEED_NODE_ADDR.0, ALPHANET_SEED_NODE_ADDR.1
-                    ),
-                    source,
-                });
+        Network::Betanet => {
+            let mut resolved = Vec::new();
+            for seed in BETANET_SEED_NODE_ADDRS {
+                let addrs = seed.to_socket_addrs().map_err(|source| {
+                    Error::ResolveSeed {
+                        address: format!("{}:{}", seed.0, seed.1),
+                        source,
+                    }
+                })?;
+                resolved.extend(addrs);
+            }
+            return Ok(resolved);
         }
     };
     Ok(addresses.to_vec())
@@ -233,7 +236,7 @@ pub struct Net {
     peer_info_tx:
         mpsc::UnboundedSender<(SocketAddr, Option<PeerConnectionInfo>)>,
     known_peers: DatabaseUnique<SerdeBincode<SocketAddr>, Unit>,
-    seed_node_name: Option<(&'static str, u16)>,
+    seed_node_names: &'static [(&'static str, u16)],
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
@@ -371,17 +374,17 @@ impl Net {
     /// Resolve the seed node name of the network to addresses.
     /// Returns an empty vector for a network without a seed node name.
     async fn resolve_seed_node_addrs(&self) -> Result<Vec<SocketAddr>, Error> {
-        let Some((host, port)) = self.seed_node_name else {
-            return Ok(Vec::new());
-        };
-        let addrs =
-            tokio::net::lookup_host((host, port))
-                .await
-                .map_err(|source| Error::ResolveSeed {
+        let mut resolved = Vec::new();
+        for (host, port) in self.seed_node_names {
+            let addrs = tokio::net::lookup_host((*host, *port)).await.map_err(
+                |source| Error::ResolveSeed {
                     address: format!("{host}:{port}"),
                     source,
-                })?;
-        Ok(addrs.collect())
+                },
+            )?;
+            resolved.extend(addrs);
+        }
+        Ok(resolved)
     }
 
     /// Dial a peer that the database knows.
@@ -500,7 +503,7 @@ impl Net {
             active_peers,
             peer_info_tx,
             known_peers,
-            seed_node_name: seed_node_name(network),
+            seed_node_names: seed_node_names(network),
             _version: version,
         };
         let known_peers: Vec<SocketAddr> = {
@@ -776,7 +779,8 @@ mod tests {
         let (seed, _) =
             make_server_endpoint((std::net::Ipv4Addr::LOCALHOST, 0).into())?;
         let seed_addr = seed.local_addr()?;
-        net.seed_node_name = Some(("localhost", seed_addr.port()));
+        net.seed_node_names =
+            Box::leak(Box::new([("localhost", seed_addr.port())]));
 
         let redial = spawn_redial(env.clone(), net.clone());
         let dialed_seed = tokio::time::timeout(Duration::from_secs(5), async {
@@ -842,8 +846,14 @@ mod tests {
     }
 
     #[test]
-    fn alphanet_seed_uses_sidechain_port() {
-        assert_eq!(ALPHANET_SEED_NODE_ADDR, ("seed.alpha.ecash.eu.com", 4098));
+    fn betanet_seeds_use_the_sidechain_port() {
+        assert_eq!(
+            BETANET_SEED_NODE_ADDRS,
+            [
+                ("seed.beta.ecash.drivecha.in", 4098),
+                ("seed.beta.ecash.ninja", 4098)
+            ]
+        );
     }
 
     #[test]
@@ -852,7 +862,7 @@ mod tests {
             (Network::Regtest, 0),
             (Network::Signet, 1),
             (Network::Forknet, 2),
-            (Network::Alphanet, 3),
+            (Network::Betanet, 4),
         ] {
             assert_eq!(
                 peer_message::magic_bytes(network),

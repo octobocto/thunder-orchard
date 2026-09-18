@@ -213,15 +213,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_accepts_alphanet() -> anyhow::Result<()> {
+    fn cli_accepts_betanet() -> anyhow::Result<()> {
         let cli = Cli::try_parse_from([
             "thunder_orchard_app",
-            "--network=alphanet",
+            "--network=betanet",
             "--headless",
             "--datadir=/tmp/zside-cli-test",
         ])?;
         let config = cli.get_config()?;
-        assert_eq!(config.network.to_string(), "alphanet");
+        assert_eq!(config.network.to_string(), "betanet");
         assert_eq!(config.net_addr, DEFAULT_NET_ADDR);
         assert!(config.headless);
         Ok(())
