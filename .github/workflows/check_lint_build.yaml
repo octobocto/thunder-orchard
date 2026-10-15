@@ -121,7 +121,7 @@ jobs:
               | awk 'tolower($1) == "etag:" { gsub(/"/, "", $2); print $2 }' \
               | tail -1
           }
-          for dep in patched:"$BITCOIN_PATCHED_URL" enforcer:"$ENFORCER_URL"; do
+          for dep in patched:"$BITCOIN_PATCHED_URL"; do
             name="${dep%%:*}"
             tag="$(etag "${dep#*:}" || true)"
             if [ -z "$tag" ]; then
@@ -132,7 +132,6 @@ jobs:
           done
         env:
           BITCOIN_PATCHED_URL: https://releases.drivechain.info/L1-bitcoin-patched-latest-x86_64-unknown-linux-gnu.zip
-          ENFORCER_URL: https://releases.drivechain.info/bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
 
       - name: Cache bitcoin-patched
         id: cache-bitcoin-patched
@@ -174,26 +173,6 @@ jobs:
           mv "bitcoin-${VERSION}/bin" deps/bitcoin-unpatched
           rm -r "bitcoin-${VERSION}"
 
-      - name: Cache bip300301_enforcer
-        id: cache-enforcer
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/deps/bip300301-enforcer
-          key: bip300301-enforcer-x86_64-linux-${{ steps.dep-keys.outputs.enforcer }}
-
-      - name: Download bip300301_enforcer
-        if: steps.cache-enforcer.outputs.cache-hit != 'true'
-        run: |
-          cd "${{ runner.temp }}"
-          wget -q https://releases.drivechain.info/bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          unzip -q bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          rm bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          mkdir -p deps
-          rm -f deps/bip300301-enforcer
-          mv bip300301-enforcer-latest-x86_64-unknown-linux-gnu/bip300301-enforcer-*-x86_64-unknown-linux-gnu deps/bip300301-enforcer
-          rm -r bip300301-enforcer-latest-x86_64-unknown-linux-gnu
-          chmod +x deps/bip300301-enforcer
-
       - name: Restore electrs from cache
         uses: actions/cache/restore@v6
         with:
@@ -216,12 +195,14 @@ jobs:
           shared-key: release-x86_64-unknown-linux-gnu
 
       - name: Build (release)
-        run: cargo build --release --bin thunder_orchard_app --example integration_tests
+        run: |
+          cargo build --locked --release --manifest-path bip300301_enforcer/Cargo.toml --target-dir "$PWD/target" --bin bip300301_enforcer
+          cargo build --locked --release --bin thunder_orchard_app --example integration_tests
 
       - name: Run integration tests
         id: runIntegrationTests
         run: |
-          export BIP300301_ENFORCER='${{ runner.temp }}/deps/bip300301-enforcer'
+          export BIP300301_ENFORCER='target/release/bip300301_enforcer'
           export BITCOIND='${{ runner.temp }}/deps/bitcoin-patched/bitcoind'
           export BITCOIND_UNPATCHED='${{ runner.temp }}/deps/bitcoin-unpatched/bitcoind'
           export BITCOIN_CLI='${{ runner.temp }}/deps/bitcoin-patched/bitcoin-cli'
