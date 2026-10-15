@@ -123,6 +123,19 @@ pub struct BlockIndex {
     pub bundle_spends: Vec<BlockIndexSpend>,
 }
 
+/// One transaction the mempool holds
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MempoolTx {
+    /// Blake3 over the inputs, the outputs and the orchard bundle without its
+    /// authorization
+    pub txid: Txid,
+    /// Canonical size in bytes
+    pub size: u64,
+    /// Borsh encoding, as hex
+    pub raw: String,
+    pub tx: transaction::Transaction,
+}
+
 impl BlockIndexEvents {
     /// True when the block moved no coins outside its body
     pub fn is_empty(&self) -> bool {

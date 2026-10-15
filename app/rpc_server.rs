@@ -384,6 +384,26 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         Ok(height)
     }
 
+    async fn list_mempool(
+        &self,
+    ) -> RpcResult<Vec<thunder_orchard::types::MempoolTx>> {
+        let txs = self.app.node.get_all_transactions().map_err(custom_err)?;
+        let res = txs
+            .into_iter()
+            .map(|authorized| {
+                let tx = authorized.transaction;
+                Ok(thunder_orchard::types::MempoolTx {
+                    txid: tx.txid(),
+                    size: tx.canonical_size()?,
+                    raw: const_hex::encode(tx.canonical_bytes()?),
+                    tx,
+                })
+            })
+            .collect::<Result<_, std::io::Error>>()
+            .map_err(custom_err)?;
+        Ok(res)
+    }
+
     async fn list_peers(&self) -> RpcResult<Vec<Peer>> {
         let peers = self.app.node.get_active_peers();
         Ok(peers)
