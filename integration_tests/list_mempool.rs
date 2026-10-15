@@ -18,6 +18,7 @@ use bitcoin::Amount;
 use futures::{
     FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
 };
+use thunder_orchard::types::MempoolTx;
 use thunder_orchard_app_rpc_api::{
     node::RpcClient as _, wallet::RpcClient as _,
 };
@@ -33,6 +34,8 @@ const DEPOSIT_AMOUNT: Amount = Amount::from_sat(21_000_000);
 const DEPOSIT_FEE: Amount = Amount::from_sat(1_000_000);
 const TRANSFER_AMOUNT: u64 = 1_000_000;
 const TRANSFER_FEE: u64 = 1_000;
+const SHIELD_AMOUNT: u64 = 1_000_000;
+const SHIELD_FEE: u64 = 1_000;
 
 /// Initial setup for the test
 async fn setup(
@@ -63,7 +66,10 @@ async fn list_mempool_task(
         Init {
             thunder_orchard_app: bin_paths.thunder_orchard()?.clone(),
             data_dir_suffix: None,
-            rpc_client_request_timeout: None,
+            // Orchard proofs can take a while
+            rpc_client_request_timeout: Some(std::time::Duration::from_secs(
+                120,
+            )),
         },
         &enforcer_post_setup,
         res_tx,
@@ -109,9 +115,34 @@ async fn list_mempool_task(
         entry.raw == const_hex::encode(entry.tx.canonical_bytes()?)
     );
 
+    let transfer = entry.clone();
+
     tracing::debug!("Checking that a block empties the mempool");
     let () = sidechain.bmm_single(&mut enforcer_post_setup).await?;
     anyhow::ensure!(sidechain.rpc_client.list_mempool().await?.is_empty());
+    check_tip_index(&sidechain, &transfer).await?;
+
+    let txid = sidechain
+        .rpc_client
+        .create_shield(SHIELD_AMOUNT, SHIELD_FEE)
+        .await?;
+    tracing::info!(%txid, "Created a shield transaction");
+
+    // The orchard bundle JSON does not decode in a client, so read the block
+    // index, which carries no transaction JSON.
+    let () = sidechain.bmm_single(&mut enforcer_post_setup).await?;
+    let tip = sidechain
+        .rpc_client
+        .get_best_sidechain_block_hash()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no sidechain tip"))?;
+    let index = sidechain.rpc_client.get_block_index(tip).await?;
+    anyhow::ensure!(index.txs.len() == 1);
+    let shield = &index.txs[0];
+    anyhow::ensure!(shield.txid == txid);
+    anyhow::ensure!(
+        const_hex::decode(&shield.raw)?.len() as u64 == shield.size
+    );
 
     drop(sidechain);
     tracing::info!(
@@ -122,6 +153,26 @@ async fn list_mempool_task(
     // Wait for tasks to die
     sleep(std::time::Duration::from_secs(1)).await;
     enforcer_post_setup.directories.base_dir.cleanup()?;
+    Ok(())
+}
+
+/// Check that the tip holds only this transaction, with the same txid, size
+/// and encoding that the mempool gave
+async fn check_tip_index(
+    sidechain: &PostSetup,
+    mempool_tx: &MempoolTx,
+) -> anyhow::Result<()> {
+    let tip = sidechain
+        .rpc_client
+        .get_best_sidechain_block_hash()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no sidechain tip"))?;
+    let index = sidechain.rpc_client.get_block_index(tip).await?;
+    anyhow::ensure!(index.txs.len() == 1);
+    let tx = &index.txs[0];
+    anyhow::ensure!(tx.txid == mempool_tx.txid);
+    anyhow::ensure!(tx.size == mempool_tx.size);
+    anyhow::ensure!(tx.raw == mempool_tx.raw);
     Ok(())
 }
 
