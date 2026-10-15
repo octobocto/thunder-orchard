@@ -75,6 +75,61 @@ pub struct WithdrawalBundleEvent {
     pub status: WithdrawalBundleEventStatus,
 }
 
+/// Coin movements that a block body does not carry: a mainchain deposit, and
+/// the outputs a withdrawal bundle removed
+#[derive(
+    Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema,
+)]
+pub struct BlockIndexEvents {
+    /// Outputs that mainchain deposits created
+    pub deposits: Vec<(transaction::OutPoint, transaction::Output)>,
+    /// Outputs that a withdrawal bundle removed, with the bundle that took them
+    pub bundle_spends: Vec<(transaction::OutPoint, M6id)>,
+}
+
+/// One transaction of a block, with the fields its body omits
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndexTx {
+    pub txid: Txid,
+    /// Canonical size in bytes
+    pub size: u64,
+    /// Borsh encoding, as hex
+    pub raw: String,
+}
+
+/// One output a mainchain deposit created
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndexDeposit {
+    pub outpoint: transaction::OutPoint,
+    pub output: transaction::Output,
+}
+
+/// One output a withdrawal bundle removed, with the bundle that took it
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndexSpend {
+    pub outpoint: transaction::OutPoint,
+    pub m6id: M6id,
+}
+
+/// Everything about a block that its body does not carry
+//  Each pair is a named struct: a tuple of ref schemas does not compose.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndex {
+    /// Transactions in body order
+    pub txs: Vec<BlockIndexTx>,
+    /// Outputs that mainchain deposits created
+    pub deposits: Vec<BlockIndexDeposit>,
+    /// Outputs that a withdrawal bundle removed
+    pub bundle_spends: Vec<BlockIndexSpend>,
+}
+
+impl BlockIndexEvents {
+    /// True when the block moved no coins outside its body
+    pub fn is_empty(&self) -> bool {
+        self.deposits.is_empty() && self.bundle_spends.is_empty()
+    }
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct WithdrawalBundle {

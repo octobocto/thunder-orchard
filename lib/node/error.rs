@@ -8,7 +8,10 @@ use crate::{
     mempool::error as mempool,
     net::error as net,
     state::error as state,
-    types::{AmountOverflowError, AmountUnderflowError, UtreexoError, proto},
+    types::{
+        AmountOverflowError, AmountUnderflowError, BlockHash, UtreexoError,
+        proto,
+    },
 };
 
 /// Non-fatal variants indicate tx rejection reason
@@ -208,6 +211,8 @@ pub enum Error {
     Net(#[from] Box<net::Error>),
     #[error("net task error")]
     NetTask(#[source] Box<net_task::Error>),
+    #[error("block {block_hash} is not in the current chain")]
+    NotInCurrentChain { block_hash: BlockHash },
     #[error("peer info stream closed")]
     PeerInfoRxClosed,
     #[error("Receive mainchain task response cancelled")]

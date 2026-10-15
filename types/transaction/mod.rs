@@ -168,6 +168,14 @@ where
     {
         borsh::to_vec(&self)
     }
+
+    /// Size of the canonical encoding in bytes
+    pub fn canonical_size(&self) -> borsh::io::Result<u64>
+    where
+        Self: BorshSerialize,
+    {
+        borsh::object_length(self).map(|size| size as u64)
+    }
 }
 
 impl<S> Transaction<orchard::InProgress<orchard::Unproven, S>>

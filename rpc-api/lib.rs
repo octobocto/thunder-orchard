@@ -28,7 +28,8 @@ pub mod node {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_orchard_types::{
-        Authorization, Block, BlockHash, Body, CoinbaseTxid, Header, InPoint,
+        Authorization, Block, BlockHash, BlockIndex, BlockIndexDeposit,
+        BlockIndexSpend, BlockIndexTx, Body, CoinbaseTxid, Header, InPoint,
         M6id, MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
         SpentOutput, Transaction, TransparentAddress, Txid, WithdrawalBundle,
         WithdrawalBundleStatus,
@@ -264,11 +265,12 @@ pub mod node {
     #[open_api(
         merge_apis[get_block::RpcDoc],
         ref_schemas[
-            Authorization, BlockHash, Body, CoinbaseTxid, Header, InPoint,
-            M6id, MerkleRoot, OutPoint, Output, OutputContent,
-            PeerConnectionStatus, SpentOutput, Transaction, TransparentAddress,
-            Txid, WithdrawalBundle, WithdrawalBundleInfo,
-            WithdrawalBundleStatus, schema::BitcoinAddr,
+            Authorization, BlockHash, BlockIndexDeposit, BlockIndexSpend,
+            BlockIndexTx, Body, CoinbaseTxid, Header, InPoint, M6id,
+            MerkleRoot, OutPoint, Output, OutputContent, PeerConnectionStatus,
+            SpentOutput, Transaction, TransparentAddress, Txid,
+            WithdrawalBundle, WithdrawalBundleInfo, WithdrawalBundleStatus,
+            schema::BitcoinAddr,
             schema::BitcoinBlockHash, schema::BitcoinOutPoint,
             schema::BitcoinTransaction, schema::BitcoinOutPoint,
             schema::BitcoinTransaction, schema::SocketAddr,
@@ -330,6 +332,15 @@ pub mod node {
             &self,
             height: u32,
         ) -> RpcResult<Option<thunder_orchard_types::BlockHash>>;
+
+        /// Get the transaction ids, sizes and encodings of a block, with the
+        /// mainchain deposits and withdrawal bundle spends it applied
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "get_block_index")]
+        async fn get_block_index(
+            &self,
+            block_hash: thunder_orchard_types::BlockHash,
+        ) -> RpcResult<BlockIndex>;
 
         /// Get mainchain blocks that commit to a specified block hash
         #[open_api_method(output_schema(
