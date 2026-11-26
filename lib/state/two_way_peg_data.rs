@@ -14,7 +14,8 @@ use crate::{
         error, rollback::RollBack,
     },
     types::{
-        AccumulatorDiff, AggregatedWithdrawal, AmountOverflowError, Coinbase,
+        AccumulatorDiff, AggregatedWithdrawal, AmountOverflowError,
+        BlockIndexEvents, BlockIndexOutput, BlockIndexSpend, Coinbase,
         CoinbaseTxid, FilledTransaction, InPoint, M6id, OutPoint, OutPointKey,
         Output, OutputContent, PointedOutput, PointedOutputRef, SpentOutput,
         WithdrawalBundle, WithdrawalBundleEvent, WithdrawalBundleEventStatus,
@@ -262,6 +263,7 @@ fn recreate_bundle_outputs(
     m6id: M6id,
     bundle: &WithdrawalBundle,
 ) -> Result<(), Error> {
+    let mut bundle_returns = Vec::with_capacity(bundle.spend_utxos().len());
     for (vout, (_outpoint, output)) in bundle.spend_utxos().iter().enumerate() {
         let vout = u32::try_from(vout).expect("bundle outputs fit in u32");
         let recreated_outpoint = OutPoint::UnsuccessfulWithdrawal {
@@ -278,8 +280,19 @@ fn recreate_bundle_outputs(
             output,
         });
         accumulator_diff.insert(utxo_hash.into());
+        bundle_returns.push(BlockIndexOutput {
+            outpoint: recreated_outpoint,
+            output: output.clone(),
+        });
     }
-    Ok(())
+    state.record_block_index_events(
+        rwtxn,
+        block_height,
+        BlockIndexEvents {
+            bundle_returns,
+            ..Default::default()
+        },
+    )
 }
 
 /// Delete the outputs recreated from an unsuccessful (failed or
@@ -672,6 +685,21 @@ fn connect_withdrawal_bundle_confirmed(
                     accumulator_diff.remove(utxo_hash.into());
                 }
                 state.utxos.clear(rwtxn).map_err(DbError::from)?;
+                let bundle_spends = utxos
+                    .keys()
+                    .map(|outpoint| BlockIndexSpend {
+                        outpoint: *outpoint,
+                        m6id,
+                    })
+                    .collect();
+                state.record_block_index_events(
+                    rwtxn,
+                    block_height,
+                    BlockIndexEvents {
+                        bundle_spends,
+                        ..Default::default()
+                    },
+                )?;
                 bundle = WithdrawalBundleInfo::UnknownConfirmed {
                     spend_utxos: utxos,
                 };
@@ -851,6 +879,17 @@ fn connect_event(
                 .utxos
                 .put(rwtxn, &OutPointKey::from(outpoint), &output)
                 .map_err(DbError::from)?;
+            state.record_block_index_events(
+                rwtxn,
+                block_height,
+                BlockIndexEvents {
+                    deposits: vec![BlockIndexOutput {
+                        outpoint,
+                        output: output.clone(),
+                    }],
+                    ..Default::default()
+                },
+            )?;
             let utxo_hash = crate::types::hashes::hash_with_scratch_buffer(
                 &PointedOutput { outpoint, output },
             );
@@ -976,6 +1015,7 @@ pub fn maybe_create_withdrawal_bundle(
         .try_get(rwtxn, &())?
         .unwrap_or_default();
     let mut accumulator_diff = AccumulatorDiff::default();
+    let mut bundle_spends = Vec::with_capacity(bundle.spend_utxos().len());
     // Spend the selected outputs.
     for (outpoint, output) in bundle.spend_utxos() {
         let key = OutPointKey::from(outpoint);
@@ -995,7 +1035,19 @@ pub fn maybe_create_withdrawal_bundle(
             output,
         });
         accumulator_diff.remove(utxo_hash.into());
+        bundle_spends.push(BlockIndexSpend {
+            outpoint: *outpoint,
+            m6id,
+        });
     }
+    state.record_block_index_events(
+        rwtxn,
+        block_height,
+        BlockIndexEvents {
+            bundle_spends,
+            ..Default::default()
+        },
+    )?;
     state.pending_withdrawal_bundle.put(rwtxn, &(), &m6id)?;
     let bundle_status = if let Some((_bundle, mut bundle_status)) =
         state.withdrawal_bundles.try_get(rwtxn, &m6id)?
@@ -1324,6 +1376,8 @@ pub fn disconnect(
     let block_height = state
         .try_get_height(rwtxn)?
         .expect("Height should not be None");
+    // This also deletes the bundle creation events of the block.
+    state.delete_block_index_events(rwtxn, block_height)?;
     let mut accumulator = state.utreexo_accumulator.get(rwtxn, &())?;
     let mut accumulator_diff = AccumulatorDiff::default();
     let mut latest_deposit_block_hash = None;
@@ -1496,7 +1550,8 @@ mod test {
             },
         },
         types::{
-            AccumulatorDiff, Coinbase, FilledTransaction, InPoint, M6id,
+            AccumulatorDiff, BlockIndexEvents, BlockIndexOutput,
+            BlockIndexSpend, Coinbase, FilledTransaction, InPoint, M6id,
             OutPoint, OutPointKey, Output, OutputContent, PointedOutputRef,
             SpentOutput, Transaction, TransparentAddress, Txid,
             WithdrawalBundle, WithdrawalBundleEvent,
@@ -1689,6 +1744,19 @@ mod test {
         anyhow::ensure!(
             bundle.spend_utxos().contains_key(&withdrawal_outpoint)
         );
+        // the block index records the spend at the creation height
+        let events = state
+            .get_block_index_events(&rwtxn, WITHDRAWAL_BUNDLE_FAILURE_GAP)?;
+        anyhow::ensure!(
+            events
+                == BlockIndexEvents {
+                    bundle_spends: vec![BlockIndexSpend {
+                        outpoint: withdrawal_outpoint,
+                        m6id: pending_m6id,
+                    }],
+                    ..Default::default()
+                }
+        );
         rwtxn.commit()?;
         Ok(())
     }
@@ -1748,6 +1816,18 @@ mod test {
             .utxos
             .get(&rwtxn, &OutPointKey::from(&recreated_outpoint))?;
         anyhow::ensure!(recreated == withdrawal_output);
+        // the block index records the recreation at the failure height
+        let events = state.get_block_index_events(&rwtxn, failed_height)?;
+        anyhow::ensure!(
+            events
+                == BlockIndexEvents {
+                    bundle_returns: vec![BlockIndexOutput {
+                        outpoint: recreated_outpoint,
+                        output: withdrawal_output.clone(),
+                    }],
+                    ..Default::default()
+                }
+        );
         // the original STXO record is untouched
         let stxo = state
             .stxos
@@ -1828,6 +1908,17 @@ mod test {
                 .try_get(&rwtxn, &OutPointKey::from(&recreated_outpoint))?
                 .is_some()
         );
+        let events = state.get_block_index_events(&rwtxn, drop_height)?;
+        anyhow::ensure!(
+            events
+                == BlockIndexEvents {
+                    bundle_returns: vec![BlockIndexOutput {
+                        outpoint: recreated_outpoint,
+                        output: withdrawal_output.clone(),
+                    }],
+                    ..Default::default()
+                }
+        );
         // no fresh bundle yet: the failure gap applies after a drop
         state.height.put(&mut rwtxn, &(), &drop_height)?;
         maybe_create_withdrawal_bundle(&state, &mut rwtxn)?;
@@ -1850,6 +1941,17 @@ mod test {
             state.try_get_pending_withdrawal_bundle(&rwtxn)?.unwrap();
         anyhow::ensure!(bundle.compute_m6id() != stale_m6id);
         anyhow::ensure!(bundle.spend_utxos().contains_key(&recreated_outpoint));
+        let events = state.get_block_index_events(
+            &rwtxn,
+            drop_height + WITHDRAWAL_BUNDLE_FAILURE_GAP,
+        )?;
+        anyhow::ensure!(
+            events.bundle_spends
+                == vec![BlockIndexSpend {
+                    outpoint: recreated_outpoint,
+                    m6id: bundle.compute_m6id(),
+                }]
+        );
         rwtxn.commit()?;
         Ok(())
     }
@@ -2170,6 +2272,20 @@ mod test {
                 state.utxos.try_get(&rwtxn, &deposit_key)?.is_some()
             );
             anyhow::ensure!(state.deposit_blocks.last(&rwtxn)?.is_some());
+            let events = state.get_block_index_events(&rwtxn, 1)?;
+            anyhow::ensure!(
+                events
+                    == BlockIndexEvents {
+                        deposits: vec![BlockIndexOutput {
+                            outpoint: OutPoint::Deposit(deposit_outpoint),
+                            output: value_output(
+                                TransparentAddress::ALL_ZEROS,
+                                1000
+                            ),
+                        }],
+                        ..Default::default()
+                    }
+            );
             rwtxn.commit()?;
             block1
         };
@@ -2191,6 +2307,9 @@ mod test {
                 state.utxos.try_get(&rwtxn, &deposit_key)?.is_none()
             );
             anyhow::ensure!(state.deposit_blocks.last(&rwtxn)?.is_none());
+            anyhow::ensure!(
+                state.get_block_index_events(&rwtxn, 1)?.is_empty()
+            );
             rwtxn.commit()?;
         }
 

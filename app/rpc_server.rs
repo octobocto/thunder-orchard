@@ -7,8 +7,8 @@ use jsonrpsee::{
     types::ErrorObject,
 };
 use thunder_orchard::types::{
-    Block, M6id, PointedOutput, ShieldedAddress, SpentOutput,
-    TransparentAddress, Txid, WithdrawalBundle,
+    Block, BlockIndex, BlockIndexTx, M6id, MempoolTx, PointedOutput,
+    ShieldedAddress, SpentOutput, TransparentAddress, Txid, WithdrawalBundle,
     net::{Peer, PeerAddress},
     wallet::{Balance, CoinSelectionHeights, TransparentTransferDests},
 };
@@ -249,6 +249,24 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         self.app.node.try_get_block_hash(height).map_err(custom_err)
     }
 
+    async fn get_block_index(
+        &self,
+        block_hash: thunder_orchard::types::BlockHash,
+    ) -> RpcResult<BlockIndex> {
+        let (body, events) = self
+            .app
+            .node
+            .get_block_index(block_hash)
+            .map_err(custom_err)?;
+        let txs = body
+            .transactions
+            .iter()
+            .map(BlockIndexTx::new)
+            .collect::<Result<_, _>>()
+            .map_err(custom_err)?;
+        Ok(BlockIndex::new(txs, events))
+    }
+
     async fn get_bmm_inclusions(
         &self,
         block_hash: thunder_orchard::types::BlockHash,
@@ -338,6 +356,14 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
             .get_latest_failed_withdrawal_bundle_height()
             .map_err(custom_err)?;
         Ok(height)
+    }
+
+    async fn list_mempool(&self) -> RpcResult<Vec<MempoolTx>> {
+        let txs = self.app.node.get_all_transactions().map_err(custom_err)?;
+        txs.into_iter()
+            .map(|authorized| MempoolTx::new(authorized.transaction))
+            .collect::<Result<_, _>>()
+            .map_err(custom_err)
     }
 
     async fn list_peers(&self) -> RpcResult<Vec<Peer>> {

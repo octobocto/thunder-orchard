@@ -28,10 +28,11 @@ pub mod node {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_orchard_types::{
-        Authorization, Block, BlockHash, Body, CoinbaseTxid, Header, InPoint,
-        M6id, MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
-        SpentOutput, Transaction, TransparentAddress, Txid, WithdrawalBundle,
-        WithdrawalBundleStatus,
+        Authorization, Block, BlockHash, BlockIndex, BlockIndexOutput,
+        BlockIndexSpend, BlockIndexTx, Body, CoinbaseTxid, Header, InPoint,
+        M6id, MempoolTx, MerkleRoot, OutPoint, Output, OutputContent,
+        PointedOutput, SpentOutput, Transaction, TransparentAddress, Txid,
+        WithdrawalBundle, WithdrawalBundleStatus,
         net::{Peer, PeerAddress, PeerConnectionStatus},
         state::WithdrawalBundleInfo,
         transaction,
@@ -264,7 +265,8 @@ pub mod node {
     #[open_api(
         merge_apis[get_block::RpcDoc],
         ref_schemas[
-            Authorization, BlockHash, Body, CoinbaseTxid, Header, InPoint,
+            Authorization, BlockHash, BlockIndexOutput, BlockIndexSpend,
+            BlockIndexTx, Body, CoinbaseTxid, Header, InPoint,
             M6id, MerkleRoot, OutPoint, Output, OutputContent,
             PeerConnectionStatus, SpentOutput, Transaction, TransparentAddress,
             Txid, WithdrawalBundle, WithdrawalBundleInfo,
@@ -331,6 +333,16 @@ pub mod node {
             height: u32,
         ) -> RpcResult<Option<thunder_orchard_types::BlockHash>>;
 
+        /// Get the txids, sizes and encodings of the transactions of a block
+        /// in the active chain, with the outputs that the block created or
+        /// spent outside its body
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "get_block_index")]
+        async fn get_block_index(
+            &self,
+            block_hash: thunder_orchard_types::BlockHash,
+        ) -> RpcResult<BlockIndex>;
+
         /// Get mainchain blocks that commit to a specified block hash
         #[open_api_method(output_schema(
             PartialSchema = "schema::BitcoinBlockHash"
@@ -378,6 +390,12 @@ pub mod node {
         async fn latest_failed_withdrawal_bundle_height(
             &self,
         ) -> RpcResult<Option<u32>>;
+
+        /// List the transactions that the mempool holds, in no particular
+        /// order
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "list_mempool")]
+        async fn list_mempool(&self) -> RpcResult<Vec<MempoolTx>>;
 
         /// List peers
         #[method(name = "list_peers")]
