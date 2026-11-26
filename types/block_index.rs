@@ -92,12 +92,35 @@ impl BlockIndex {
     }
 }
 
+/// One transaction that the mempool holds
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MempoolTx {
+    pub txid: Txid,
+    /// Canonical size in bytes
+    pub size: u64,
+    /// Canonical borsh encoding, as hex
+    pub raw: String,
+    pub tx: Transaction,
+}
+
 impl BlockIndexTx {
     pub fn new(tx: &Transaction) -> borsh::io::Result<Self> {
         Ok(Self {
             txid: tx.txid(),
             size: tx.canonical_size()?,
             raw: const_hex::encode(tx.canonical_bytes()?),
+        })
+    }
+}
+
+impl MempoolTx {
+    pub fn new(tx: Transaction) -> borsh::io::Result<Self> {
+        let BlockIndexTx { txid, size, raw } = BlockIndexTx::new(&tx)?;
+        Ok(Self {
+            txid,
+            size,
+            raw,
+            tx,
         })
     }
 }

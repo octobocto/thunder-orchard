@@ -30,9 +30,9 @@ pub mod node {
     use thunder_orchard_types::{
         Authorization, Block, BlockHash, BlockIndex, BlockIndexOutput,
         BlockIndexSpend, BlockIndexTx, Body, CoinbaseTxid, Header, InPoint,
-        M6id, MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
-        SpentOutput, Transaction, TransparentAddress, Txid, WithdrawalBundle,
-        WithdrawalBundleStatus,
+        M6id, MempoolTx, MerkleRoot, OutPoint, Output, OutputContent,
+        PointedOutput, SpentOutput, Transaction, TransparentAddress, Txid,
+        WithdrawalBundle, WithdrawalBundleStatus,
         net::{Peer, PeerAddress, PeerConnectionStatus},
         state::WithdrawalBundleInfo,
         transaction,
@@ -390,6 +390,12 @@ pub mod node {
         async fn latest_failed_withdrawal_bundle_height(
             &self,
         ) -> RpcResult<Option<u32>>;
+
+        /// List the transactions that the mempool holds, in no particular
+        /// order
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "list_mempool")]
+        async fn list_mempool(&self) -> RpcResult<Vec<MempoolTx>>;
 
         /// List peers
         #[method(name = "list_peers")]

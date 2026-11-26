@@ -7,8 +7,8 @@ use jsonrpsee::{
     types::ErrorObject,
 };
 use thunder_orchard::types::{
-    Block, BlockIndex, BlockIndexTx, M6id, PointedOutput, ShieldedAddress,
-    SpentOutput, TransparentAddress, Txid, WithdrawalBundle,
+    Block, BlockIndex, BlockIndexTx, M6id, MempoolTx, PointedOutput,
+    ShieldedAddress, SpentOutput, TransparentAddress, Txid, WithdrawalBundle,
     net::{Peer, PeerAddress},
     wallet::{Balance, CoinSelectionHeights, TransparentTransferDests},
 };
@@ -356,6 +356,14 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
             .get_latest_failed_withdrawal_bundle_height()
             .map_err(custom_err)?;
         Ok(height)
+    }
+
+    async fn list_mempool(&self) -> RpcResult<Vec<MempoolTx>> {
+        let txs = self.app.node.get_all_transactions().map_err(custom_err)?;
+        txs.into_iter()
+            .map(|authorized| MempoolTx::new(authorized.transaction))
+            .collect::<Result<_, _>>()
+            .map_err(custom_err)
     }
 
     async fn list_peers(&self) -> RpcResult<Vec<Peer>> {

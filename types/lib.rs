@@ -19,7 +19,7 @@ pub use block::{Block, Body, Coinbase, Header};
 pub mod block_index;
 pub use block_index::{
     BlockIndex, BlockIndexEvents, BlockIndexOutput, BlockIndexSpend,
-    BlockIndexTx,
+    BlockIndexTx, MempoolTx,
 };
 pub mod error;
 pub use error::{
