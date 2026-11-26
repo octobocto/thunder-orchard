@@ -7,8 +7,8 @@ use jsonrpsee::{
     types::ErrorObject,
 };
 use thunder_orchard::types::{
-    Block, M6id, PointedOutput, ShieldedAddress, SpentOutput,
-    TransparentAddress, Txid, WithdrawalBundle,
+    Block, BlockIndex, BlockIndexTx, M6id, PointedOutput, ShieldedAddress,
+    SpentOutput, TransparentAddress, Txid, WithdrawalBundle,
     net::{Peer, PeerAddress},
     wallet::{Balance, CoinSelectionHeights, TransparentTransferDests},
 };
@@ -247,6 +247,24 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         height: u32,
     ) -> RpcResult<Option<thunder_orchard::types::BlockHash>> {
         self.app.node.try_get_block_hash(height).map_err(custom_err)
+    }
+
+    async fn get_block_index(
+        &self,
+        block_hash: thunder_orchard::types::BlockHash,
+    ) -> RpcResult<BlockIndex> {
+        let (body, events) = self
+            .app
+            .node
+            .get_block_index(block_hash)
+            .map_err(custom_err)?;
+        let txs = body
+            .transactions
+            .iter()
+            .map(BlockIndexTx::new)
+            .collect::<Result<_, _>>()
+            .map_err(custom_err)?;
+        Ok(BlockIndex::new(txs, events))
     }
 
     async fn get_bmm_inclusions(

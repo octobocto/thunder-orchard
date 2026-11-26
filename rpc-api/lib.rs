@@ -28,7 +28,8 @@ pub mod node {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_orchard_types::{
-        Authorization, Block, BlockHash, Body, CoinbaseTxid, Header, InPoint,
+        Authorization, Block, BlockHash, BlockIndex, BlockIndexOutput,
+        BlockIndexSpend, BlockIndexTx, Body, CoinbaseTxid, Header, InPoint,
         M6id, MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
         SpentOutput, Transaction, TransparentAddress, Txid, WithdrawalBundle,
         WithdrawalBundleStatus,
@@ -264,7 +265,8 @@ pub mod node {
     #[open_api(
         merge_apis[get_block::RpcDoc],
         ref_schemas[
-            Authorization, BlockHash, Body, CoinbaseTxid, Header, InPoint,
+            Authorization, BlockHash, BlockIndexOutput, BlockIndexSpend,
+            BlockIndexTx, Body, CoinbaseTxid, Header, InPoint,
             M6id, MerkleRoot, OutPoint, Output, OutputContent,
             PeerConnectionStatus, SpentOutput, Transaction, TransparentAddress,
             Txid, WithdrawalBundle, WithdrawalBundleInfo,
@@ -330,6 +332,16 @@ pub mod node {
             &self,
             height: u32,
         ) -> RpcResult<Option<thunder_orchard_types::BlockHash>>;
+
+        /// Get the txids, sizes and encodings of the transactions of a block
+        /// in the active chain, with the outputs that the block created or
+        /// spent outside its body
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "get_block_index")]
+        async fn get_block_index(
+            &self,
+            block_hash: thunder_orchard_types::BlockHash,
+        ) -> RpcResult<BlockIndex>;
 
         /// Get mainchain blocks that commit to a specified block hash
         #[open_api_method(output_schema(
